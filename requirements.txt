@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+requests
+bcrypt
+tronpy
+aiohttp
+psycopg2-binary
+python-telegram-bot
+telethon
