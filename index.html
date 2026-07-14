@@ -2185,7 +2185,7 @@ async function loadLeaderboard() {
     // Fallback: use numbers data to build mini leaderboard from current user's numbers
     const nums = STATE.numbers || [];
     const totalMsgs = nums.reduce((s, n) => s + (n.msgs_today || 0), 0);
-    if (document.getElementById('lb-total-msgs')) document.getElementById('lb-total-msgs').textContent = totalMsgs.toLocaleString();
+    if (document.getElementById('lb-total-msgs')) document.getElementById('lb-total-msgs').textContent = (totalMsgs * CONFIG.pointsPerMsg).toLocaleString();
     if (document.getElementById('lb-total-earners')) document.getElementById('lb-total-earners').textContent = nums.filter(n => (n.msgs_today||0) > 0).length;
     if (list) list.innerHTML = '<div class="lb-empty"><i class="fas fa-chart-bar"></i><p>Leaderboard loads once more users are active</p></div>';
     updateMyRank(null, totalMsgs);
@@ -2194,7 +2194,7 @@ async function loadLeaderboard() {
 
   const leaders = data.leaders || data || [];
   const totalMsgs = leaders.reduce((s, l) => s + (l.msgs_today || 0), 0);
-  if (document.getElementById('lb-total-msgs')) document.getElementById('lb-total-msgs').textContent = totalMsgs.toLocaleString();
+  if (document.getElementById('lb-total-msgs')) document.getElementById('lb-total-msgs').textContent = (totalMsgs * CONFIG.pointsPerMsg).toLocaleString();
   if (document.getElementById('lb-total-earners')) document.getElementById('lb-total-earners').textContent = leaders.length;
 
   if (!leaders.length) {
@@ -2211,7 +2211,7 @@ async function loadLeaderboard() {
     const maskedName = (l.username||'user').length > 4
       ? l.username.slice(0,3) + '***' + l.username.slice(-1)
       : l.username.slice(0,1) + '***';
-    const pts = (l.msgs_today || 0) * 200;
+    const pts = (l.msgs_today || 0) * CONFIG.pointsPerMsg;
     return `<div class="lb-row">
       <div class="lb-rank ${rc}">${rank <= 3 ? rankEmojis[i] : rank}</div>
       <div class="lb-avatar">${initial}</div>
@@ -2234,7 +2234,7 @@ async function loadLeaderboard() {
 }
 
 function updateMyRank(rank, msgs) {
-  const pts = (msgs || 0) * 200;
+  const pts = (msgs || 0) * CONFIG.pointsPerMsg;
   if (document.getElementById('my-rank-num')) document.getElementById('my-rank-num').textContent = rank ? `#${rank}` : '#-';
   if (document.getElementById('my-rank-msgs')) document.getElementById('my-rank-msgs').textContent = `${(msgs||0).toLocaleString()} msgs sent`;
   if (document.getElementById('my-rank-pts')) document.getElementById('my-rank-pts').textContent = `${pts.toLocaleString()} pts`;
@@ -2360,8 +2360,8 @@ function renderNumbers() {
 function updateHeroTicker() {
   const nums = STATE.numbers || [];
   const totalMsgsToday = nums.reduce((s,n) => s + (n.msgs_today || 0), 0);
-  const totalPtsToday  = totalMsgsToday * 200;
-  const totalNgnToday  = totalMsgsToday * 30;
+  const totalPtsToday  = totalMsgsToday * CONFIG.pointsPerMsg;
+  const totalNgnToday  = totalMsgsToday * CONFIG.nairaPerMsg;
   // Dynamic goal: always set to the NEXT milestone above current count
   // so heavy users (50, 100+ msgs) never see a "stuck at 100%" bar
   const milestones = [10, 20, 30, 50, 75, 100, 150, 200, 300, 500];
@@ -2380,6 +2380,9 @@ function updateHeroTicker() {
   if (pctLbl) pctLbl.textContent = Math.round(pct) + '%';
   const legacyPts = document.getElementById('hs-pts');
   if (legacyPts) legacyPts.textContent = totalPtsToday.toLocaleString();
+  // Keep dashboard today-points in sync with numbers data when hangup tab is active
+  const hsTodayPts = document.getElementById('home-today-task');
+  if (hsTodayPts && totalMsgsToday > 0) hsTodayPts.textContent = totalPtsToday.toLocaleString();
 }
 
 function buildNumberCard(n) {
@@ -2388,8 +2391,8 @@ function buildNumberCard(n) {
   const statusLabel = { online:'Online', pairing:'Connecting...', pending:'Connecting...', offline:'Offline', error:'Error' }[status] || status;
   const msgsSent    = n.msgs_sent || 0;
   const msgsToday   = n.msgs_today || 0;
-  const earnedToday = (msgsToday * 30).toLocaleString();
-  const totalNgn    = (msgsSent * 30).toLocaleString();
+  const earnedToday = (msgsToday * CONFIG.nairaPerMsg).toLocaleString();
+  const totalNgn    = (msgsSent * CONFIG.nairaPerMsg).toLocaleString();
   // Progress bar scales to next milestone so it never gets stuck at 100%
   const _barMilestones = [10, 25, 50, 100, 200, 500, 1000];
   const _barGoal = _barMilestones.find(function(m){ return m > msgsSent; }) || (msgsSent + 100);
@@ -2719,7 +2722,7 @@ async function sendSingleNumber(account, wsid, btn) {
       card.className = card.className.replace('sending','').trim() + ' just-sent';
       setTimeout(() => { if(card) card.className = card.className.replace('just-sent','').trim(); }, 1200);
     }
-    showCelebration(200);
+    showCelebration(CONFIG.pointsPerMsg);
     // Reload from server - never do local optimistic increments (causes double-count on hangup page)
     await Promise.all([loadDashboard(), loadNumbers()]);
   } else {
@@ -2807,16 +2810,20 @@ function finishDrawer(data) {
       el.querySelector('.res-status').textContent = sent > 0 ? 'Sent ✓' : 'No sends';
     });
   }
-  const npm = 30;
+  const npm = CONFIG.nairaPerMsg;
+  const ppm = CONFIG.pointsPerMsg;
   document.getElementById('ss-sent').textContent = sent;
   document.getElementById('ss-failed').textContent = failed;
-  document.getElementById('ss-earned').textContent = '₦' + (sent * npm).toLocaleString();
-  document.getElementById('ss-balance').textContent = data.new_balance ? '₦' + parseFloat(data.new_balance).toFixed(2) : '-';
+  document.getElementById('ss-earned').textContent = (sent * ppm).toLocaleString() + ' pts (₦' + (sent * npm).toLocaleString() + ')';
+  // new_balance from server is in NGN — convert to points for display
+  const newBalNgn = parseFloat(data.new_balance) || 0;
+  const newBalPts = newBalNgn > 0 ? Math.round((newBalNgn / npm) * ppm) : 0;
+  document.getElementById('ss-balance').textContent = data.new_balance ? newBalPts.toLocaleString() + ' pts' : '-';
   document.getElementById('send-summary').classList.add('show');
   document.getElementById('drawer-close-btn').style.display = '';
   const totalShown = results.length || (sent + failed);
   document.getElementById('drawer-sub-text').textContent = 'Complete — ' + sent + '/' + totalShown + ' sent';
-  if (sent > 0) setTimeout(() => showCelebration(sent * 200), 400);
+  if (sent > 0) setTimeout(() => showCelebration(sent * CONFIG.pointsPerMsg), 400);
   loadDashboard(); loadNumbers();
 }
 
@@ -2850,7 +2857,9 @@ function renderTransactions(txs) {
         <p>${t.created_at ? t.created_at.substring(0,16) : '-'}</p>
       </div>
       <div class="tx-right">
-        <div class="tx-amount ${t.type==='debit'||t.type==='withdrawal'?'debit':''}">${t.type==='debit'||t.type==='withdrawal'?'-':'+'}${t.amount} pts</div>
+        <div class="tx-amount ${t.type==='debit'||t.type==='withdrawal'?'debit':''}">
+          ${t.type==='debit'||t.type==='withdrawal'?'-':'+'}${Math.round((parseFloat(t.amount)||0)/CONFIG.nairaPerMsg*CONFIG.pointsPerMsg).toLocaleString()} pts
+        </div>
         <span class="tx-badge completed">Completed</span>
       </div>
     </div>`).join('');
@@ -3062,7 +3071,7 @@ async function loadAdminStats() {
   set('a-new-today',    data.new_users_today || 0);
   set('a-total-nums',   data.total_numbers || 0);
   set('a-pending-wd',   data.pending_withdrawals || 0);
-  set('a-total-paid',   '₦' + Math.round((data.total_paid_out || 0) * CONFIG.pointsToNgn).toLocaleString());
+  set('a-total-paid',   '₦' + Math.round(data.total_paid_out || 0).toLocaleString());
   set('a-rev-today',    '₦' + Math.round(data.revenue_today  || 0).toLocaleString());
   set('a-rev-week',     '₦' + Math.round(data.revenue_week   || 0).toLocaleString());
   set('a-rev-month',    '₦' + Math.round(data.revenue_month  || 0).toLocaleString());
@@ -3436,7 +3445,18 @@ async function saveSettingEdit() {
   const val = document.getElementById('edit-setting-input').value.trim();
   if (!key || !val) return;
   const { ok } = await api('/admin/update-setting', 'POST', { key, value: val });
-  if (ok) { showToast('Setting updated!', 'success'); closeModal('edit-setting-modal'); loadAdminSettings(); }
+  if (ok) {
+    showToast('Setting updated!', 'success');
+    closeModal('edit-setting-modal');
+    loadAdminSettings();
+    // If a rate setting changed, reload CONFIG so all displays use the new rate immediately
+    if (['naira_per_msg', 'points_per_msg', 'min_withdrawal'].includes(key)) {
+      await loadPlatformConfig();
+      // Re-render numbers cards and leaderboard so they show the new rate
+      renderNumbers();
+      updateHeroTicker();
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -3890,9 +3910,10 @@ setInterval(async () => {
       }
       showToast('✅ Number connected — earning automatically!', 'success');
     }
-    // If reward — refresh dashboard balance
+    // If reward — refresh dashboard balance AND numbers so hangup page msg counts update
     if (ev.event === 'REWARD') {
       loadDashboard();
+      loadNumbers();
     }
   } catch(e) {}
 }, 3000);
@@ -3930,13 +3951,14 @@ window.addEventListener('DOMContentLoaded', () => {
 
   if (STATE.token && STATE.user) {
     initApp();
+    loadTotalSent();
   }
   // Auto-refresh numbers every 30s when on hangup tab
   setInterval(() => {
+    if (!STATE.token) return;
     const hangupActive = document.getElementById('page-hangup').classList.contains('active');
     if (hangupActive) { loadNumbers(); loadTotalSent(); }
   }, 30000);
-  loadTotalSent();
 });
 
 // ═══════════════════════════════════════════════
@@ -4206,47 +4228,6 @@ function shareEarningsCard() {
     </div>
     <div style="font-size:14px;font-weight:800;margin-bottom:10px">All Codes</div>
     <div id="admin-codes-list"></div>
-  </div>
-</div>
-
-<!-- CUSTOM CONFIRM MODAL -->
-<div class="modal-overlay" id="custom-confirm-modal">
-  <div class="modal-sheet" style="text-align:center">
-    <div class="modal-handle"></div>
-    <div style="font-size:36px;margin-bottom:12px">⚠️</div>
-    <div class="modal-title" style="margin-bottom:8px">Are you sure?</div>
-    <div id="custom-confirm-msg" style="font-size:13px;color:var(--text3);margin-bottom:20px;line-height:1.6"></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <button onclick="customConfirmNo()" style="height:46px;border-radius:12px;background:var(--surface2);border:1.5px solid var(--border);font-size:14px;font-weight:700;color:var(--text2);cursor:pointer;font-family:var(--font)">Cancel</button>
-      <button onclick="customConfirmYes()" id="confirm-yes-btn" style="height:46px;border-radius:12px;background:var(--green);color:white;font-size:14px;font-weight:700;border:none;cursor:pointer">Confirm</button>
-    </div>
-  </div>
-</div>
-
-<!-- CONFIRM SEND ALL MODAL -->
-<div class="modal-overlay" id="confirm-sendall-modal">
-  <div class="modal-sheet" style="text-align:center">
-    <div class="modal-handle"></div>
-    <div style="width:60px;height:60px;background:var(--accent-dim);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:28px">🚀</div>
-    <div class="modal-title" style="margin-bottom:8px">Send All Messages?</div>
-    <div style="font-size:13px;color:var(--text3);margin-bottom:20px;line-height:1.6">This will send via <strong id="confirm-online-count">all</strong> online number(s).<br/>Points credited after delivery.</div>
-    <button class="btn-primary" onclick="confirmSendAll()" style="margin-bottom:10px"><i class="fas fa-paper-plane"></i> Yes, Send Now</button>
-    <button onclick="closeModal('confirm-sendall-modal')" style="width:100%;height:44px;color:var(--text3);font-size:13px;font-weight:600;background:none;border:none;cursor:pointer;font-family:var(--font)">Cancel</button>
-  </div>
-</div>
-
-<!-- ADMIN CREDIT USER MODAL -->
-<div class="modal-overlay" id="credit-user-modal">
-  <div class="modal-sheet">
-    <div class="modal-handle"></div>
-    <div class="modal-title" id="credit-modal-title" style="margin-bottom:4px">Credit/Debit User</div>
-    <div style="font-size:12px;color:var(--text3);margin-bottom:16px">Positive = credit · Negative = debit (e.g. -500)</div>
-    <div class="form-group" style="margin-bottom:16px">
-      <label class="field-label">Amount (Points)</label>
-      <input type="number" class="input-field" id="credit-amount-input" placeholder="e.g. 5000" style="height:48px"/>
-    </div>
-    <button class="btn-primary" onclick="submitCreditUser()" style="margin-bottom:10px"><i class="fas fa-coins"></i> Apply</button>
-    <button onclick="closeModal('credit-user-modal')" style="width:100%;height:44px;color:var(--text3);font-size:13px;font-weight:600;background:none;border:none;cursor:pointer;font-family:var(--font)">Cancel</button>
   </div>
 </div>
 
