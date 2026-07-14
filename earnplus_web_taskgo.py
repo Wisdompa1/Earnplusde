@@ -752,11 +752,21 @@ def _pair_bg(user_id: int, account: str):
             if account in active_pairs: active_pairs[account]["status"] = "error"
 
 # ═══════════════════ HELPERS ═══════════════════
-def _to_pts(ngn):
-    """Convert naira amount to points using current rate."""
+def _ngn_to_pts(ngn_amount: float) -> int:
+    """Convert stored NGN to display points."""
     npm = float(get_setting("naira_per_msg", "30"))
     ppm = int(get_setting("points_per_msg", "200"))
-    return int(ngn / npm * ppm) if npm > 0 else 0
+    if npm <= 0 or ppm <= 0:
+        return int(ngn_amount)
+    return int((ngn_amount / npm) * ppm)
+
+def _pts_to_ngn(pts: int) -> float:
+    """Convert user-entered points to NGN for storage/withdrawal."""
+    npm = float(get_setting("naira_per_msg", "30"))
+    ppm = int(get_setting("points_per_msg", "200"))
+    if ppm <= 0:
+        return 0.0
+    return (pts / ppm) * npm
 
 def _pts_per_msg():
     """Points earned per message."""
@@ -918,10 +928,10 @@ def dashboard(user=Depends(get_current_user)):
             on = db.execute("SELECT COUNT(*) as c FROM numbers WHERE user_id=? AND status='online'", (uid,)).fetchone()["c"]
     rc = u["referral_code"] or ""; pu = get_setting("platform_url", "") or ""
     return {
-        "balance":               int(u["balance"] or 0),
-        "today_points":          int(te or 0),
-        "today_referral_points": int(tr or 0),
-        "total_earned":          int(ta or 0),
+        "balance":               _ngn_to_pts(u["balance"] or 0),
+        "today_points":          _ngn_to_pts(te or 0),
+        "today_referral_points": _ngn_to_pts(tr or 0),
+        "total_earned":          _ngn_to_pts(ta or 0),
         "online_numbers":        on,
         "msgs_today":            msgs_today,
         "total_msgs_sent":       total_msgs_sent,
@@ -1239,17 +1249,18 @@ def send_message(req: SendOneReq, user=Depends(get_current_user)):
     if not wsid: raise HTTPException(400, "Number not registered properly")
     ok, msg = api_sendmsg(req.account, wsid)
     if ok:
-        npm = float(get_setting("naira_per_msg", "30")); ppm = int(get_setting("points_per_msg", "200"))
-        pts = ppm  # points per message — always use ppm directly
+        ppm = int(get_setting("points_per_msg", "200"))
+        ngn_earned = float(get_setting("naira_per_msg", "30"))
         with get_db() as db:
-            _credit(db, uid, pts, f"Message sent via {req.account}")
+            _credit(db, uid, ngn_earned, f"Message sent via {req.account}")
             db.execute("UPDATE numbers SET msgs_sent=msgs_sent+1 WHERE user_id=? AND account=?", (uid, req.account))
             _increment_daily_msgs(db, uid, 1)
             u = db.execute("SELECT referred_by FROM users WHERE id=?", (uid,)).fetchone()
             if u and u["referred_by"]:
-                bonus = max(1, int(pts * float(get_setting("referral_pct", "5")) / 100))
-                _credit(db, u["referred_by"], bonus, f"Ref bonus from {uid}", "referral")
-        return {"ok": True, "earned": pts, "points": ppm}
+                ref_pct = float(get_setting("referral_pct", "5"))
+                ngn_bonus = _pts_to_ngn(ppm) * (ref_pct / 100)
+                _credit(db, u["referred_by"], ngn_bonus, f"Ref bonus from {uid}", "referral")
+        return {"ok": True, "earned": ppm, "points": ppm}
     # FIXED: only act when phonestatus is EXACTLY 0 (confirmed offline)
     # If None (timeout/network error) — keep number alive, just tell user to retry
     phone_status = api_phonestatus(req.account)
@@ -1375,8 +1386,9 @@ def send_all(user=Depends(get_current_user)):
         total_earned_pts = 0
         if actual_sends > 0:
             total_earned_pts = actual_sends * ppm
+            ngn_earned = _pts_to_ngn(total_earned_pts)
             with get_db() as db:
-                _credit(db, uid, total_earned_pts, f"TaskGo: sent {actual_sends} messages")
+                _credit(db, uid, ngn_earned, f"TaskGo: sent {actual_sends} messages")
                 _increment_daily_msgs(db, uid, actual_sends)
                 for r in rows:
                     acct = r["account"]
@@ -1387,9 +1399,10 @@ def send_all(user=Depends(get_current_user)):
                             (num_ok, uid, acct))
                 u = db.execute("SELECT referred_by FROM users WHERE id=?", (uid,)).fetchone()
                 if u and u["referred_by"]:
-                    bonus = max(1, int(total_earned_pts * float(get_setting("referral_pct", "5")) / 100))
-                    _credit(db, u["referred_by"], bonus, f"Ref bonus from uid={uid}", "referral")
-            log.info(f"[TaskGo:SendAll] uid={uid} credited {total_earned_pts} pts for {actual_sends} sends")
+                    ref_pct = float(get_setting("referral_pct", "5"))
+                    ngn_bonus = _pts_to_ngn(total_earned_pts) * (ref_pct / 100)
+                    _credit(db, u["referred_by"], ngn_bonus, f"Ref bonus from uid={uid}", "referral")
+            log.info(f"[TaskGo:SendAll] uid={uid} credited {ngn_earned} NGN ({total_earned_pts} pts) for {actual_sends} sends")
         else:
             log.warning(f"[TaskGo:SendAll] uid={uid} 0 sends — no reward")
 
@@ -1441,8 +1454,8 @@ def send_all(user=Depends(get_current_user)):
             results.append({"account": acct, "ok": ok, "message": msg})
             if ok:
                 with get_db() as db2:
-                    pts_per = ppm  # points per message directly
-                    _credit(db2, uid, pts_per, f"Send-all via {acct}")
+                    ngn_earned = float(get_setting("naira_per_msg", "30"))
+                    _credit(db2, uid, ngn_earned, f"Send-all via {acct}")
                     db2.execute("UPDATE numbers SET msgs_sent=msgs_sent+1 WHERE user_id=? AND account=?", (uid, acct))
                     _increment_daily_msgs(db2, uid, 1)
             else:
@@ -1474,8 +1487,8 @@ def earnings(user=Depends(get_current_user)):
         ty  = db.execute("SELECT COALESCE(SUM(amount),0) as s FROM transactions WHERE user_id=? AND type='earn' AND date(created_at)=date('now','-1 day')", (uid,)).fetchone()["s"]
         tm  = db.execute("SELECT COALESCE(SUM(amount),0) as s FROM transactions WHERE user_id=? AND type='earn' AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')", (uid,)).fetchone()["s"]
         txs = db.execute("SELECT * FROM transactions WHERE user_id=? ORDER BY created_at DESC LIMIT 50", (uid,)).fetchall()
-    return {"total": _to_pts(ta), "today": _to_pts(tt), "yesterday": _to_pts(ty),
-            "this_month": _to_pts(tm), "transactions": [dict(t) for t in txs]}
+    return {"total": _ngn_to_pts(ta), "today": _ngn_to_pts(tt), "yesterday": _ngn_to_pts(ty),
+            "this_month": _ngn_to_pts(tm), "transactions": [dict(t) for t in txs]}
 
 @app.post("/withdraw")
 def withdraw(req: WithdrawReq, user=Depends(get_current_user)):
@@ -1492,28 +1505,30 @@ def withdraw(req: WithdrawReq, user=Depends(get_current_user)):
         pts = int(req.amount or 0)
         HANDLING_FEE_PTS = 200
         if pts < min_pts: raise HTTPException(400, f"Minimum withdrawal is {min_pts} points")
-        cur_bal = int(u["balance"] or 0)
-        if pts > cur_bal: raise HTTPException(400, "Insufficient balance")
+        cur_bal_ngn = float(u["balance"] or 0)
+        cur_bal_pts = _ngn_to_pts(cur_bal_ngn)
+        if pts > cur_bal_pts: raise HTTPException(400, "Insufficient balance")
         total_pts_deducted = pts + HANDLING_FEE_PTS
-        if total_pts_deducted > cur_bal:
+        if total_pts_deducted > cur_bal_pts:
             raise HTTPException(400, "Insufficient balance to cover withdrawal amount plus handling fee")
         ngn_payout = pts_to_ngn(pts)
+        ngn_debit = pts_to_ngn(total_pts_deducted)
         with get_db() as db:
             bank = db.execute("SELECT * FROM bank_details WHERE user_id=?", (uid,)).fetchone()
             if not bank: raise HTTPException(400, "No bank details set")
-            _debit(db, uid, total_pts_deducted, "Withdrawal")
+            _debit(db, uid, ngn_debit, "Withdrawal")
             db.execute("INSERT INTO withdrawals(user_id,amount,method,status,bank_name,account_num,account_name,pts_amount) VALUES(?,?,'bank','pending',?,?,?,?)",
                        (uid, ngn_payout, bank["bank_name"], bank["account_num"], bank["account_name"], pts))
         return {"status": "submitted", "message": "Withdrawal submitted! Processing in 1-3 business days."}
     elif req.method == "trx":
         pts = int(req.amount or req.ngn_amount or 0)
-        cur_bal = int(u["balance"] or 0)
-        if pts > cur_bal: raise HTTPException(400, "Insufficient balance")
+        cur_bal_pts = _ngn_to_pts(float(u["balance"] or 0))
+        if pts > cur_bal_pts: raise HTTPException(400, "Insufficient balance")
         ngn = pts_to_ngn(pts)
         with get_db() as db:
             wallet = db.execute("SELECT wallet_address FROM trx_wallets WHERE user_id=?", (uid,)).fetchone()
             if not wallet: raise HTTPException(400, "No TRX wallet set")
-            _debit(db, uid, pts, "TRX withdrawal")
+            _debit(db, uid, ngn, "TRX withdrawal")
             db.execute("INSERT INTO withdrawals(user_id,amount,method,status,wallet_addr) VALUES(?,?,'trx','pending',?)",
                        (uid, ngn, wallet["wallet_address"]))
         return {"status": "submitted", "message": "TRX withdrawal submitted! Processing within 24 hours."}
@@ -1541,8 +1556,8 @@ def wd_orders(status: str = "all", user=Depends(get_current_user)):
         # Always ensure pts_amount is a correct non-zero integer.
         # Old records have pts_amount=0 (migration default) — recalculate from stored NGN amount.
         stored_pts = row.get("pts_amount") or 0
-        if not stored_pts and row.get("amount") and ppm > 0 and npm > 0:
-            stored_pts = int(round(row["amount"] / npm * ppm))
+        if not stored_pts and row.get("amount"):
+            stored_pts = _ngn_to_pts(row["amount"])
         row["pts_amount"] = stored_pts
         order_list.append(row)
     return {"orders": order_list, "stats": stats}
@@ -1696,8 +1711,8 @@ def promo_stats(user=Depends(get_current_user)):
         ty     = db.execute("SELECT COALESCE(SUM(amount),0) as s FROM transactions WHERE user_id=? AND type='referral' AND date(created_at)=date('now','-1 day')", (uid,)).fetchone()["s"]
         direct = db.execute("SELECT COUNT(*) as c FROM users WHERE referred_by=?", (uid,)).fetchone()["c"]
     rc = u["referral_code"] or ""; pu = get_setting("platform_url", "") or ""
-    return {"total_commission": _to_pts(tc), "today_commission": _to_pts(td),
-            "yesterday_commission": _to_pts(ty), "direct_active_users": direct,
+    return {"total_commission": _ngn_to_pts(tc), "today_commission": _ngn_to_pts(td),
+            "yesterday_commission": _ngn_to_pts(ty), "direct_active_users": direct,
             "total_active_users": direct, "new_today": 0,
             "referral_code": rc, "referral_link": f"{pu}?ref={rc}" if pu else f"/?ref={rc}"}
 
@@ -1798,8 +1813,8 @@ async def worker_result(request: Request):
                     bonus   = round(npm * ref_pct / 100, 2)
                     _credit(db, u["referred_by"], bonus, f"Referral bonus from user {user_id}", "referral")
                 bal         = db.execute("SELECT balance FROM users WHERE id=?", (user_id,)).fetchone()["balance"]
-                pts_earned  = _to_pts(npm)
-                pts_balance = _to_pts(bal)
+                pts_earned  = _ngn_to_pts(npm)
+                pts_balance = _ngn_to_pts(bal)
                 _notify(db, user_id,
                     f"+{pts_earned} points",
                     f"You earned {pts_earned} points via {number}. New balance: {pts_balance:,} points.",
@@ -1956,16 +1971,17 @@ def admin_ban(req: BanReq, user=Depends(admin_only)):
 
 @app.post("/admin/credit-user")
 def admin_credit(req: CreditReq, user=Depends(admin_only)):
-    # req.amount is in POINTS — store directly as points
+    # req.amount is in POINTS — convert to NGN for storage
     pts = int(req.amount)
     pts_display = abs(pts)
+    ngn_amount = _pts_to_ngn(abs(pts))
     with get_db() as db:
         if pts >= 0:
-            _credit(db, req.user_id, pts, "Admin credit")
+            _credit(db, req.user_id, ngn_amount, "Admin credit")
             _notify(db, req.user_id, "Balance Credited",
                     f"An admin has credited {pts_display:,} pts to your account.", "success")
         else:
-            _debit(db, req.user_id, abs(pts), "Admin debit")
+            _debit(db, req.user_id, ngn_amount, "Admin debit")
             _notify(db, req.user_id, "Balance Adjusted",
                     f"An admin has adjusted your balance by -{pts_display:,} pts.", "info")
         _admin_log(db, user["user_id"], "credit_user", f"user_id={req.user_id}", str(req.amount))
@@ -1986,7 +2002,7 @@ def admin_approve_wd(req: WdActionReq, user=Depends(admin_only)):
         if not wd: raise HTTPException(404, "Not found")
         if wd["status"] != "pending": raise HTTPException(400, "Withdrawal already processed")
         db.execute("UPDATE withdrawals SET status='done',updated_at=datetime('now') WHERE id=?", (req.withdrawal_id,))
-        pts_disp = wd["pts_amount"] or _to_pts(wd["amount"])
+        pts_disp = wd["pts_amount"] or _ngn_to_pts(wd["amount"])
         _notify(db, wd["user_id"], "Withdrawal Approved",
                 f"Your withdrawal of {pts_disp:,} pts has been approved and is being processed!", "success")
         _admin_log(db, user["user_id"], "approve_withdrawal", f"WD#{req.withdrawal_id}", str(wd["amount"]))
@@ -2001,7 +2017,7 @@ def admin_reject_wd(req: WdActionReq, user=Depends(admin_only)):
         db.execute("UPDATE withdrawals SET status='rejected',reason=?,updated_at=datetime('now') WHERE id=?",
                    (req.reason or "Rejected by admin", req.withdrawal_id))
         _credit(db, wd["user_id"], wd["amount"], f"Refund WD#{req.withdrawal_id}")
-        pts_disp = wd["pts_amount"] or _to_pts(wd["amount"])
+        pts_disp = wd["pts_amount"] or _ngn_to_pts(wd["amount"])
         _notify(db, wd["user_id"], "Withdrawal Rejected",
                 f"Your withdrawal of {pts_disp:,} pts was rejected. Reason: {req.reason or 'Rejected by admin'}. Points refunded.", "error")
         _admin_log(db, user["user_id"], "reject_withdrawal", f"WD#{req.withdrawal_id}", req.reason)
@@ -2740,13 +2756,12 @@ def _w_deliver_result(event, number, user_id, **kwargs):
                 sent = kwargs.get("sent", 0)
                 npm = float(get_setting("naira_per_msg", "30"))
                 ppm = int(get_setting("points_per_msg", "200"))
-                pts = ppm  # points per message directly
-                if pts > 0:
-                    # pts already calculated as points
-                    _credit(db, user_id, pts, f"Auto earn via {number}")
+                if npm > 0:
+                    _credit(db, user_id, npm, f"Auto earn via {number}")
                     bal = db.execute("SELECT balance FROM users WHERE id=?", (user_id,)).fetchone()
-                    bal_pts = bal[0] if bal else 0
-                    _push_live(user_id, "REWARD", f"💰 +{pts} points earned via {number}! Balance: {bal_pts:,} pts", "success")
+                    bal_ngn = bal[0] if bal else 0
+                    bal_pts = _ngn_to_pts(bal_ngn)
+                    _push_live(user_id, "REWARD", f"💰 +{ppm} points earned via {number}! Balance: {bal_pts:,} pts", "success")
                 log.info(f"[Worker] REWARD {number} sent={sent}")
 
             elif event == "DISCONNECTED":
