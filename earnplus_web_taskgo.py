@@ -853,11 +853,41 @@ def _pair_bg(user_id: int, account: str):
             db.execute("UPDATE numbers SET status='online',wsid=?,pair_code=NULL WHERE user_id=? AND account=?",
                        (wsid, user_id, account))
             # FIXED: reset today's daily_msgs so card shows 0 earned on fresh connect
-            # without this, stale msgs from previous sessions show as fake earnings
             db.execute("DELETE FROM daily_msgs WHERE user_id=? AND date=?", (user_id, today))
         with pairs_lock:
             if account in active_pairs: active_pairs[account].update({"status": "online", "wsid": wsid})
         log.info(f"[Pair] Online {account} wsid={wsid}")
+
+        # ── VARIANT CHAIN (manual mode) ───────────────────────────────────────
+        MAX_VARIANT_ONLINE = 4
+        base_key = _variant_chain_key(account)
+        with _variant_chain_lock:
+            current_count = _variant_online_count.get(base_key, 0) + 1
+            _variant_online_count[base_key] = current_count
+        log.info(f"[Pair:Variant] base={base_key} online_count={current_count}/{MAX_VARIANT_ONLINE}")
+        if current_count < MAX_VARIANT_ONLINE:
+            next_account = _next_variant(account, current_count)
+            log.info(f"[Pair:Variant] Starting next variant: {next_account} (step={current_count})")
+            _push_live(user_id, "VARIANT_PAIRING",
+                       f"Connected! Auto-starting next variant: {next_account}", "info")
+            with get_db() as db:
+                ex = db.execute("SELECT status FROM numbers WHERE user_id=? AND account=?",
+                                (user_id, next_account)).fetchone()
+                if not ex:
+                    db.execute("INSERT INTO numbers(user_id,account,status) VALUES(?,?,'pairing')",
+                               (user_id, next_account))
+                elif ex["status"] != "online":
+                    db.execute(
+                        "UPDATE numbers SET status='pairing',pair_code=NULL,wsid=NULL WHERE user_id=? AND account=?",
+                        (user_id, next_account))
+            if not ex or ex["status"] != "online":
+                threading.Thread(target=_pair_bg, args=(user_id, next_account), daemon=True).start()
+        else:
+            log.info(f"[Pair:Variant] Chain complete for base={base_key} — {MAX_VARIANT_ONLINE} online, stopping.")
+            _push_live(user_id, "VARIANT_DONE",
+                       f"All {MAX_VARIANT_ONLINE} number variants are now connected and earning!", "success")
+            with _variant_chain_lock:
+                _variant_online_count.pop(base_key, None)
     else:
         with get_db() as db:
             db.execute("UPDATE numbers SET status='error' WHERE user_id=? AND account=?", (user_id, account))
