@@ -3915,6 +3915,17 @@ setInterval(async () => {
       loadDashboard();
       loadNumbers();
     }
+    // Variant chain: backend auto-started pairing the next variant number
+    if (ev.event === 'VARIANT_PAIRING') {
+      // Refresh numbers list so the new variant card appears immediately
+      loadNumbers();
+      showToast(ev.message, 'info');
+    }
+    // Variant chain: all 4 variants are now connected
+    if (ev.event === 'VARIANT_DONE') {
+      loadNumbers(); loadDashboard();
+      showToast(ev.message, 'success');
+    }
   } catch(e) {}
 }, 3000);
 
